@@ -50,6 +50,7 @@ class RDTLayer(object):
         self.receiveBuff = []
         self.sendBuff = {}
         self.countSegmentTimeouts = 0
+        self.unacked = 0
 
     # ################################################################################################################ #
     # setSendChannel()                                                                                                 #
@@ -125,8 +126,10 @@ class RDTLayer(object):
         print('processSend(): ')
         if self.dataToSend:
             for i in range(RDTLayer.FLOW_CONTROL_WIN_SIZE//4):
-                if self.seqnum >= len(self.dataToSend):
+                # Make sure the number of bytes that have been sent to server is always less than Flow Control Window Size
+                if self.seqnum >= len(self.dataToSend) or (self.unacked * RDTLayer.DATA_LENGTH) > (RDTLayer.FLOW_CONTROL_WIN_SIZE - RDTLayer.DATA_LENGTH):
                     break
+                self.unacked += 1
                 segmentSend = Segment()
                 seqnum = self.seqnum
                 windowEnd = min(self.seqnum + RDTLayer.DATA_LENGTH, len(self.dataToSend))
@@ -141,7 +144,7 @@ class RDTLayer(object):
                 self.seqnum += RDTLayer.DATA_LENGTH
 
                 # Add segment to dictionary and set timer [timer, segment]
-                self.sendBuff[seqnum] = [5, segmentSend]
+                self.sendBuff[seqnum] = [2, segmentSend]
 
     # ################################################################################################################ #
     # processReceive()                                                                                                 #
@@ -156,7 +159,6 @@ class RDTLayer(object):
         # This call returns a list of incoming segments (see Segment class)...
         listIncomingSegments = self.receiveChannel.receive()
         for seg in listIncomingSegments:
-            print('Segment received: ', seg.printToConsole())
             # drop packet if there is a checksum error
             if not seg.checkChecksum():
                 print('Checksum error, packet dropped')
@@ -165,10 +167,11 @@ class RDTLayer(object):
             # Server
             if seg.acknum == -1:
                 segmentAck = Segment()  # Segment acknowledging packet(s) received
-                # if not expected next segment, add to buffer
                 expected = self.seqnum + RDTLayer.DATA_LENGTH
+                # if not expected next segment, add to buffer
                 if seg.seqnum != expected:
                     print("out of order")
+                    # Check if the sequence number is in the receive buffer and is greater than current received to eliminate duplicates
                     if seg.seqnum not in [s[0] for s in self.receiveBuff] and seg.seqnum > self.seqnum:
                         self.receiveBuff.append((seg.seqnum, seg.payload))
                 else:
@@ -184,6 +187,7 @@ class RDTLayer(object):
                 print("Ack received: ", seg.acknum)
                 if seg.acknum in self.sendBuff:
                     del self.sendBuff[seg.acknum]
+                    self.unacked -= 1
 
         # fill what is possible
         if self.receiveBuff:
@@ -204,9 +208,8 @@ class RDTLayer(object):
                     data = self.dataToSend[begin:windowEnd]
                     segmentSend.setData(seg, data)
                     self.sendChannel.send(segmentSend)
-                    self.sendBuff[seg] = [5, segmentSend]
+                    self.sendBuff[seg] = [3, segmentSend]
                     self.countSegmentTimeouts += 1
-            print(self.sendBuff)
 
     def buildData(self) -> None:
         """
@@ -218,7 +221,7 @@ class RDTLayer(object):
         processed = 0
         for data in self.receiveBuff:
             if data[0] == next:
-                print("--------------Expected: ", next)
+                # print("--------------Expected: ", next)
                 self.received += data[1]
                 self.seqnum = next
                 next += RDTLayer.DATA_LENGTH
@@ -227,4 +230,3 @@ class RDTLayer(object):
                 continue
         for i in range(processed):
             del self.receiveBuff[0]
-        print(self.receiveBuff)
